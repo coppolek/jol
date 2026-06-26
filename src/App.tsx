@@ -211,6 +211,36 @@ export default function App() {
   const [historyStartDate, setHistoryStartDate] = useState('');
   const [historyEndDate, setHistoryEndDate] = useState('');
   const [jollyWorkloadFilter, setJollyWorkloadFilter] = useState<'Tutti' | 'Liberi' | 'Critici'>('Tutti');
+  const [isAiModalOpen, setIsAiModalOpen] = useState(false);
+  const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
+  const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+
+  const handleGenerateAiSuggestion = async () => {
+    setIsAiModalOpen(true);
+    setIsGeneratingAi(true);
+    setAiSuggestion(null);
+    try {
+      const response = await fetch('/api/suggest-coverage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          absences: absences.filter(a => !a.coveredBy),
+          operators: jollyOperators,
+          sites: sites
+        })
+      });
+      const data = await response.json();
+      if (response.ok) {
+        setAiSuggestion(data.suggestion);
+      } else {
+        setAiSuggestion("Si è verificato un errore durante la generazione dei suggerimenti.");
+      }
+    } catch (error) {
+      setAiSuggestion("Impossibile connettersi all'assistente AI.");
+    } finally {
+      setIsGeneratingAi(false);
+    }
+  };
 
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
   const [newRequestOperatorName, setNewRequestOperatorName] = useState('');
@@ -271,6 +301,8 @@ export default function App() {
       return 0;
     }
   };
+
+  const [balanceWorkload, setBalanceWorkload] = useState(true);
 
   const handleAutoAssign = () => {
     const updatedAbsences = absences.map(a => ({ ...a }));
@@ -334,7 +366,7 @@ export default function App() {
             const hA = getOperatorHours(a.id, absence.date, updatedAbsences);
             const hB = getOperatorHours(b.id, absence.date, updatedAbsences);
             
-            if (hA.weeklyHours !== hB.weeklyHours) {
+            if (balanceWorkload && hA.weeklyHours !== hB.weeklyHours) {
               return hA.weeklyHours - hB.weeklyHours;
             }
             return hA.dailyHours - hB.dailyHours;
@@ -597,6 +629,10 @@ export default function App() {
       }
       return s;
     }));
+  };
+
+  const handleUpdateSiteRules = (siteId: string, rules: string) => {
+    setSites(sites.map(s => s.id === siteId ? { ...s, aiRules: rules } : s));
   };
 
   const handleDeleteSiteSchedule = (siteId: string, scheduleId: string) => {
@@ -1288,6 +1324,17 @@ export default function App() {
               >
                 <BarChart3 className="w-4 h-4" />
               </button>
+              
+              {/* AI Button */}
+              <button 
+                onClick={handleGenerateAiSuggestion}
+                className="p-1.5 px-3 rounded-md border border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm ml-2"
+                title="Suggerimenti AI Coperture"
+              >
+                <MessageSquare className="w-4 h-4" />
+                <span className="hidden sm:inline">Suggerimenti AI</span>
+              </button>
+
               <div className="text-[11px] font-mono text-slate-400 hidden lg:block ml-4 border-l border-slate-200 pl-4">Auto-generato tramite VBA</div>
             </div>
           )}
@@ -1855,6 +1902,15 @@ export default function App() {
             <XSquare className="w-4 h-4 text-rose-500" />
             Reset
           </button>
+          <label className="hidden md:flex items-center gap-2 text-xs font-semibold text-slate-600 bg-white border border-slate-200 px-3 py-2 rounded-md shadow-sm cursor-pointer hover:bg-slate-50 transition-colors">
+            <input 
+              type="checkbox" 
+              checked={balanceWorkload} 
+              onChange={e => setBalanceWorkload(e.target.checked)} 
+              className="rounded text-indigo-600 focus:ring-indigo-500 border-slate-300 w-4 h-4" 
+            />
+            Bilancia carico
+          </label>
           <button onClick={handleAutoAssign} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 md:px-6 py-2 rounded-md text-xs md:text-sm font-bold shadow-md transition-all flex items-center gap-2 flex-1 md:flex-none justify-center">
             <RefreshCw className="w-4 h-4" />
             ESEGUI MACRO
@@ -1972,6 +2028,45 @@ export default function App() {
            <div className="bg-slate-700 px-3 py-1 rounded text-[10px] border border-slate-600 hover:bg-slate-600 transition-colors cursor-pointer">Invia Notifiche SMS</div>
         </div>
       </footer>
+
+      {/* AI Suggestion Modal */}
+      {isAiModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center p-4 z-[60] backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg overflow-hidden flex flex-col p-6 max-h-[80vh]">
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-100">
+              <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
+                <MessageSquare className="w-5 h-5 text-purple-600" />
+                Suggerimenti AI Coperture
+              </h3>
+              <button onClick={() => setIsAiModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="overflow-y-auto text-sm text-slate-700 bg-slate-50 p-4 rounded-lg border border-slate-100 min-h-[150px] whitespace-pre-wrap">
+              {isGeneratingAi ? (
+                <div className="flex flex-col items-center justify-center h-full gap-3 py-8 text-slate-400">
+                  <RefreshCw className="w-8 h-8 animate-spin text-purple-400" />
+                  <p>L'intelligenza artificiale sta analizzando le regole dei cantieri e le assenze...</p>
+                </div>
+              ) : (
+                <div className="markdown-body text-slate-700 prose prose-sm max-w-none">
+                  {aiSuggestion || "Nessun suggerimento disponibile."}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-6 flex justify-end">
+              <button 
+                onClick={() => setIsAiModalOpen(false)}
+                className="bg-purple-600 text-white px-4 py-2 rounded-md text-sm font-semibold hover:bg-purple-700 transition-colors shadow-sm"
+              >
+                Chiudi
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Confirm Modal */}
       {confirmAction && (
@@ -2415,6 +2510,18 @@ export default function App() {
                                 ))}
                               </div>
                             )}
+                            
+                            <div className="mt-4 pt-3 border-t border-slate-100">
+                              <label className="block text-xs font-semibold text-indigo-700 mb-1 flex items-center gap-1">
+                                <MessageSquare className="w-3.5 h-3.5" /> Note AI per coperture
+                              </label>
+                              <textarea
+                                value={site.aiRules || ''}
+                                onChange={(e) => handleUpdateSiteRules(site.id, e.target.value)}
+                                placeholder="Regole personalizzate per l'IA (es. 'L'operatore Mario abita vicino e ha priorità per questo cantiere')"
+                                className="w-full text-xs text-slate-700 bg-indigo-50/30 border border-indigo-100 rounded-md px-3 py-2 focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 min-h-[60px] resize-y"
+                              />
+                            </div>
                           </div>
                         </div>
                       )}

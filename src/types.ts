@@ -42,6 +42,7 @@ export interface Site {
   city: string;
   schedules: SiteSchedule[];
   assignedOperatorId: string | null;
+  aiRules?: string;
 }
 
 export interface JollyOperator {
