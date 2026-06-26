@@ -1,21 +1,17 @@
-FROM node:20-alpine
-
+# Fase di build
+FROM node:20-alpine as build
 WORKDIR /app
-
-# Copy package files
 COPY package*.json ./
-
-# Install dependencies
 RUN npm install
-
-# Copy all project files
 COPY . .
-
-# Build the project (creates dist/ folder and dist/server.cjs)
 RUN npm run build
 
-# Expose the API port
-EXPOSE 3000
+# Fase di produzione con NGINX
+FROM nginx:alpine
+# Copia l'output della build
+COPY --from=build /app/dist /usr/share/nginx/html
+# Copia la configurazione personalizzata per gestire la SPA e la porta 3000
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Start the Node.js production server
-CMD ["npm", "run", "start"]
+EXPOSE 3000
+CMD ["nginx", "-g", "daemon off;"]
