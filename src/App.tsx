@@ -793,7 +793,10 @@ export default function App() {
                       <input 
                         type="date"
                         value={abs.date}
-                        onChange={(e) => setAbsences(absences.map(a => a.id === abs.id ? { ...a, date: e.target.value } : a))}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setAbsences(prev => prev.map(a => a.id === abs.id ? { ...a, date: val } : a));
+                        }}
                         className="bg-transparent border-b border-transparent hover:border-slate-200 focus:border-indigo-500 focus:outline-none w-24 pointer-events-auto"
                         onClick={(e) => e.stopPropagation()}
                       />
@@ -802,7 +805,10 @@ export default function App() {
                       <input 
                         type="text"
                         value={abs.site}
-                        onChange={(e) => setAbsences(absences.map(a => a.id === abs.id ? { ...a, site: e.target.value } : a))}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setAbsences(prev => prev.map(a => a.id === abs.id ? { ...a, site: val } : a));
+                        }}
                         className="bg-transparent border-b border-transparent hover:border-slate-200 focus:border-indigo-500 focus:outline-none w-32 pointer-events-auto"
                         onClick={(e) => e.stopPropagation()}
                       />
@@ -812,7 +818,10 @@ export default function App() {
                           <input 
                             type="text"
                             value={abs.timeSlot}
-                            onChange={(e) => setAbsences(absences.map(a => a.id === abs.id ? { ...a, timeSlot: e.target.value } : a))}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setAbsences(prev => prev.map(a => a.id === abs.id ? { ...a, timeSlot: val } : a));
+                            }}
                             className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-medium border-none focus:outline-none focus:ring-1 focus:ring-indigo-500 w-24 pointer-events-auto"
                             onClick={(e) => e.stopPropagation()}
                           />
@@ -1138,6 +1147,7 @@ export default function App() {
                                     }}
                                     onDrop={(e) => {
                                       e.preventDefault();
+                                      e.stopPropagation();
                                       setDragOverTarget(null);
                                       setDraggedItem(null);
                                       const id = e.dataTransfer.getData('absenceId');
@@ -1207,7 +1217,10 @@ export default function App() {
                                                 <input 
                                                   type="text" 
                                                   value={shift.site} 
-                                                  onChange={(e) => setAbsences(absences.map(a => a.id === shift.id ? { ...a, site: e.target.value } : a))}
+                                                  onChange={(e) => {
+                                                    const val = e.target.value;
+                                                    setAbsences(prev => prev.map(a => a.id === shift.id ? { ...a, site: val } : a));
+                                                  }}
                                                   className="text-[10px] font-bold text-emerald-800 bg-transparent border-b border-transparent hover:border-emerald-200 focus:border-emerald-500 focus:outline-none w-full truncate pointer-events-auto"
                                                   title={shift.site}
                                                   onClick={(e) => e.stopPropagation()}
@@ -1216,7 +1229,10 @@ export default function App() {
                                                   <input 
                                                     type="text" 
                                                     value={shift.timeSlot} 
-                                                    onChange={(e) => setAbsences(absences.map(a => a.id === shift.id ? { ...a, timeSlot: e.target.value } : a))}
+                                                    onChange={(e) => {
+                                                      const val = e.target.value;
+                                                      setAbsences(prev => prev.map(a => a.id === shift.id ? { ...a, timeSlot: val } : a));
+                                                    }}
                                                     className="text-[9px] text-emerald-600 bg-transparent border-b border-transparent hover:border-emerald-200 focus:border-emerald-500 focus:outline-none w-20 truncate pointer-events-auto"
                                                     onClick={(e) => e.stopPropagation()}
                                                   />
@@ -1250,6 +1266,7 @@ export default function App() {
                                     }}
                                     onDrop={(e) => {
                                       e.preventDefault();
+                                      e.stopPropagation();
                                       setDragOverTarget(null);
                                       setDraggedItem(null);
                                       const id = e.dataTransfer.getData('absenceId');
