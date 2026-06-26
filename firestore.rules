@@ -17,5 +17,11 @@ service cloud.firestore {
     match /jollyOperators/{jollyId} {
       allow read, write: if true;
     }
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+    match /notifications/{notificationId} {
+      allow read, write: if true;
+    }
   }
 }

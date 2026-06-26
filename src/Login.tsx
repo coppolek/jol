@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
-import { auth } from './firebase';
+import { doc, setDoc } from 'firebase/firestore';
+import { auth, db } from './firebase';
 import { Building2, Lock, User } from 'lucide-react';
 
 export default function Login() {
@@ -20,7 +21,13 @@ export default function Login() {
     
     try {
       if (isRegistering) {
-        await createUserWithEmailAndPassword(auth, email, password);
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        await setDoc(doc(db, 'users', userCredential.user.uid), {
+          uid: userCredential.user.uid,
+          username: username.trim(),
+          allowedTabs: ['richieste', 'malattie', 'assenze', 'calendario'],
+          isAdmin: username.trim().toLowerCase() === 'admin'
+        });
       } else {
         await signInWithEmailAndPassword(auth, email, password);
       }

@@ -5,20 +5,21 @@
 
 import React, { useState, useEffect } from 'react';
 import { initialRequests, initialAbsences, initialJollyOperators, initialOperators, initialSites } from './data';
-import { Absence, Request, JollyOperator, AbsenceReason, Operator, Site, SiteSchedule } from './types';
-import { Calendar, CheckSquare, ClipboardList, Clock, RefreshCw, User, XSquare, Users, X, Plus, Trash2, Activity, Building2, ChevronLeft, ChevronRight, LogOut, GripVertical, BarChart3, Mail, MessageSquare, History } from 'lucide-react';
+import { Absence, Request, JollyOperator, AbsenceReason, Operator, Site, SiteSchedule, UserProfile, AppNotification } from './types';
+import { Calendar, CheckSquare, ClipboardList, Clock, RefreshCw, User, XSquare, Users, X, Plus, Trash2, Activity, Building2, ChevronLeft, ChevronRight, LogOut, GripVertical, BarChart3, Mail, MessageSquare, History, AlertTriangle, Search, Bell } from 'lucide-react';
 import { cn } from './utils';
 import { format, parseISO, startOfWeek, addDays } from 'date-fns';
 import { it } from 'date-fns/locale';
 import { useFirestoreSync } from './useFirestoreSync';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { auth } from './firebase';
+import { doc, getDoc, updateDoc, setDoc } from 'firebase/firestore';
+import { auth, db, createSecondaryUser } from './firebase';
 import Login from './Login';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from 'recharts';
 
 type Tab = 'richieste' | 'malattie' | 'assenze' | 'calendario';
 
-type AppNotification = {
+type ToastNotification = {
   id: string;
   message: string;
   jollyName: string;
@@ -26,17 +27,28 @@ type AppNotification = {
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [toastNotifications, setToastNotifications] = useState<ToastNotification[]>([]);
+  const [globalNotifications, setGlobalNotifications] = useFirestoreSync<AppNotification>('notifications', []);
 
   const triggerNotification = (jollyName: string, siteName: string, dateStr: string, timeSlot: string) => {
     const id = Math.random().toString(36).substr(2, 9);
     const dateFormatted = format(parseISO(dateStr), 'dd/MM/yyyy');
     const message = `Nuovo turno a ${siteName} il ${dateFormatted} (${timeSlot})`;
-    setNotifications(prev => [...prev, { id, message, jollyName }]);
+    setToastNotifications(prev => [...prev, { id, message, jollyName }]);
     setTimeout(() => {
-      setNotifications(prev => prev.filter(n => n.id !== id));
+      setToastNotifications(prev => prev.filter(n => n.id !== id));
     }, 6000);
+    
+    // Also push a global notification
+    const newGlobalNotif: AppNotification = {
+      id: Math.random().toString(36).substr(2, 9),
+      message: `Assegnato turno a ${jollyName}: ${siteName} il ${dateFormatted} (${timeSlot})`,
+      timestamp: new Date().toISOString(),
+      readBy: []
+    };
+    setGlobalNotifications([...globalNotifications, newGlobalNotif]);
   };
 
   const simulateSMSToJolly = (jolly: JollyOperator, shifts: Absence[]) => {
@@ -50,24 +62,41 @@ export default function App() {
 
     const id = Math.random().toString(36).substr(2, 9);
     const message = `Pianificazione Settimanale:\n${shiftDetails}`;
-    setNotifications(prev => [...prev, { id, message, jollyName: jolly.name }]);
+    setToastNotifications(prev => [...prev, { id, message, jollyName: jolly.name }]);
     setTimeout(() => {
-      setNotifications(prev => prev.filter(n => n.id !== id));
+      setToastNotifications(prev => prev.filter(n => n.id !== id));
     }, 8000);
   };
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
+      if (currentUser) {
+        try {
+          const docRef = doc(db, 'users', currentUser.uid);
+          const docSnap = await getDoc(docRef);
+          if (docSnap.exists()) {
+            setUserProfile(docSnap.data() as UserProfile);
+          }
+        } catch (e) {
+          console.error("Error fetching user profile", e);
+        }
+      } else {
+        setUserProfile(null);
+      }
       setAuthLoading(false);
     });
     return () => unsubscribe();
-  }, []);
+  }, [db]);
 
   const [activeTab, setActiveTab] = useState<Tab>('calendario');
   const [selectedWeekStart, setSelectedWeekStart] = useState(format(startOfWeek(new Date(), { weekStartsOn: 1 }), 'yyyy-MM-dd'));
   const [assenzeMonth, setAssenzeMonth] = useState(format(new Date(), 'yyyy-MM'));
   const [assenzeWeekStart, setAssenzeWeekStart] = useState<string>('');
+  const [showAllAbsences, setShowAllAbsences] = useState(false);
+  const [requestsSearchQuery, setRequestsSearchQuery] = useState('');
+  const [requestsSearchStatus, setRequestsSearchStatus] = useState('Tutti');
+  const [requestsSearchMonth, setRequestsSearchMonth] = useState('');
   const [requests, setRequests] = useFirestoreSync<Request>('requests', initialRequests);
   const [absences, setAbsences] = useFirestoreSync<Absence>('absences', initialAbsences);
   const [jollyOperators, setJollyOperators] = useFirestoreSync<JollyOperator>('jollyOperators', initialJollyOperators);
@@ -142,10 +171,11 @@ export default function App() {
           site: newSite, 
           timeSlot: newTimeSlot,
           originalTimeSlot: ca.timeSlot,
-          originalSite: ca.site
+          originalSite: ca.site,
+          date: existing.date || ca.date
         });
         
-        if (existing.reason !== ca.reason || existing.timeSlot !== newTimeSlot || existing.site !== newSite || existing.originalTimeSlot !== ca.timeSlot || existing.originalSite !== ca.site) {
+        if (existing.reason !== ca.reason || existing.timeSlot !== newTimeSlot || existing.site !== newSite || existing.originalTimeSlot !== ca.timeSlot || existing.originalSite !== ca.site || existing.date !== (existing.date || ca.date)) {
           hasChanges = true;
         }
       } else {
@@ -171,13 +201,15 @@ export default function App() {
   const [calendarioView, setCalendarioView] = useState<'weekly' | 'history'>('weekly');
   
   const [newOperatorName, setNewOperatorName] = useState('');
-  const [newOperatorType, setNewOperatorType] = useState<'Standard' | 'Jolly'>('Standard');
+  const [newOperatorType, setNewOperatorType] = useState<'Standard' | 'Jolly' | 'Esterno'>('Standard');
   const [newSiteName, setNewSiteName] = useState('');
   const [operatorSearchQuery, setOperatorSearchQuery] = useState('');
   const [siteSearchQuery, setSiteSearchQuery] = useState('');
   const [newSiteAddress, setNewSiteAddress] = useState('');
   const [newSiteCity, setNewSiteCity] = useState('');
   const [jollySearchQuery, setJollySearchQuery] = useState('');
+  const [historyStartDate, setHistoryStartDate] = useState('');
+  const [historyEndDate, setHistoryEndDate] = useState('');
   const [jollyWorkloadFilter, setJollyWorkloadFilter] = useState<'Tutti' | 'Liberi' | 'Critici'>('Tutti');
 
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
@@ -241,7 +273,7 @@ export default function App() {
   };
 
   const handleAutoAssign = () => {
-    const updatedAbsences = [...absences];
+    const updatedAbsences = absences.map(a => ({ ...a }));
     let assignmentsMade = 0;
 
     const getWeekKey = (dateStr: string) => {
@@ -288,7 +320,7 @@ export default function App() {
           .filter(a => a.date === absence.date && a.coveredBy !== null && doTimeSlotsOverlap(a.timeSlot, absence.timeSlot))
           .map(a => a.coveredBy);
 
-        let availableJollies = jollyOperators.filter(j => !overlappingJollyIds.includes(j.id));
+        let availableJollies = jollyOperators.filter(j => !overlappingJollyIds.includes(j.id) && j.name.toUpperCase() !== 'COPERTURA ESTERNA' && operators.find(o => o.id === j.id)?.type !== 'Esterno');
         
         availableJollies = availableJollies.filter(j => {
            const { dailyHours, weeklyHours } = getOperatorHours(j.id, absence.date, updatedAbsences);
@@ -330,6 +362,96 @@ export default function App() {
     }
   };
 
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [isUsersModalOpen, setIsUsersModalOpen] = useState(false);
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
+  
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newUserTabs, setNewUserTabs] = useState<Tab[]>(['richieste', 'malattie', 'assenze', 'calendario']);
+  const [newUserIsAdmin, setNewUserIsAdmin] = useState(false);
+  const [isCreatingUser, setIsCreatingUser] = useState(false);
+  const [newUserError, setNewUserError] = useState('');
+  
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setNewUserError('');
+    if (!newUsername.trim() || !newPassword.trim()) {
+      setNewUserError('Nome utente e password sono obbligatori.');
+      return;
+    }
+    if (newPassword.length < 6) {
+      setNewUserError('La password deve essere di almeno 6 caratteri.');
+      return;
+    }
+    
+    setIsCreatingUser(true);
+    try {
+      const email = `${newUsername.trim().toLowerCase()}@cantiere.it`;
+      const userCredential = await createSecondaryUser(email, newPassword);
+      
+      const newUserData: UserProfile = {
+        uid: userCredential.user.uid,
+        username: newUsername.trim(),
+        allowedTabs: newUserTabs,
+        isAdmin: newUserIsAdmin
+      };
+      
+      await setDoc(doc(db, 'users', userCredential.user.uid), newUserData);
+      setAllUsers([...allUsers, newUserData]);
+      
+      setNewUsername('');
+      setNewPassword('');
+      setNewUserTabs(['richieste', 'malattie', 'assenze', 'calendario']);
+      setNewUserIsAdmin(false);
+    } catch (err: any) {
+      if (err.code === 'auth/email-already-in-use') {
+         setNewUserError('Nome utente già in uso.');
+      } else {
+         setNewUserError(err.message || 'Errore durante la creazione.');
+      }
+    } finally {
+      setIsCreatingUser(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isUsersModalOpen && userProfile?.isAdmin) {
+      import('firebase/firestore').then(({ collection, getDocs }) => {
+        getDocs(collection(db, 'users')).then(snapshot => {
+          setAllUsers(snapshot.docs.map(d => d.data() as UserProfile));
+        });
+      });
+    }
+  }, [isUsersModalOpen, userProfile, db]);
+
+  const toggleUserTab = async (targetUserId: string, tab: Tab) => {
+    const targetUser = allUsers.find(u => u.uid === targetUserId);
+    if (!targetUser) return;
+    
+    const currentTabs = targetUser.allowedTabs || [];
+    const newTabs = currentTabs.includes(tab) 
+      ? currentTabs.filter(t => t !== tab) 
+      : [...currentTabs, tab];
+      
+    const docRef = doc(db, 'users', targetUserId);
+    await updateDoc(docRef, { allowedTabs: newTabs });
+    
+    setAllUsers(allUsers.map(u => u.uid === targetUserId ? { ...u, allowedTabs: newTabs } : u));
+  };
+
+  const unreadCount = user ? globalNotifications.filter(n => !(n.readBy || []).includes(user.uid)).length : 0;
+
+  const handleMarkAsRead = (notifId: string) => {
+    if (!user) return;
+    const notif = globalNotifications.find(n => n.id === notifId);
+    if (notif && !(notif.readBy || []).includes(user.uid)) {
+      const updatedReadBy = [...(notif.readBy || []), user.uid];
+      const updatedGlobal = globalNotifications.map(n => n.id === notifId ? { ...n, readBy: updatedReadBy } : n);
+      setGlobalNotifications(updatedGlobal);
+    }
+  };
+
   const handleClearAssignments = () => {
     setConfirmAction({
       message: 'Sei sicuro di voler resettare tutte le assegnazioni del calendario?',
@@ -355,10 +477,18 @@ export default function App() {
       setOperators([...operators, newOp]);
       setNewOperatorName('');
       
-      if (newOperatorType === 'Jolly') {
+      if (newOperatorType === 'Jolly' || newOperatorType === 'Esterno') {
         const maxOrder = Math.max(0, ...jollyOperators.map(j => j.order ?? 0));
         setJollyOperators([...jollyOperators, { id: newOp.id, name: newOp.name, order: maxOrder + 1 }]);
       }
+      
+      const newGlobalNotif: AppNotification = {
+        id: Math.random().toString(36).substr(2, 9),
+        message: `Nuovo operatore aggiunto in anagrafica: ${name} (${newOperatorType})`,
+        timestamp: new Date().toISOString(),
+        readBy: []
+      };
+      setGlobalNotifications(prev => [...prev, newGlobalNotif]);
     }
   };
 
@@ -376,9 +506,20 @@ export default function App() {
     setConfirmAction({
       message: 'Rimuovere questo operatore? Le coperture assegnate verranno perse.',
       onConfirm: () => {
+        const op = operators.find(o => o.id === id);
         setOperators(prev => prev.filter(op => op.id !== id));
         setJollyOperators(prev => prev.filter(op => op.id !== id));
         setAbsences(prev => prev.map(a => a.coveredBy === id ? { ...a, coveredBy: null } : a));
+        
+        if (op) {
+          const newGlobalNotif: AppNotification = {
+            id: Math.random().toString(36).substr(2, 9),
+            message: `Operatore rimosso: ${op.name}`,
+            timestamp: new Date().toISOString(),
+            readBy: []
+          };
+          setGlobalNotifications(prev => [...prev, newGlobalNotif]);
+        }
       }
     });
   };
@@ -402,6 +543,14 @@ export default function App() {
       setNewSiteName('');
       setNewSiteAddress('');
       setNewSiteCity('');
+
+      const newGlobalNotif: AppNotification = {
+        id: Math.random().toString(36).substr(2, 9),
+        message: `Nuovo cantiere aggiunto: ${name}`,
+        timestamp: new Date().toISOString(),
+        readBy: []
+      };
+      setGlobalNotifications(prev => [...prev, newGlobalNotif]);
     }
   };
 
@@ -466,7 +615,17 @@ export default function App() {
     setConfirmAction({
       message: 'Rimuovere questo cantiere?',
       onConfirm: () => {
+        const site = sites.find(s => s.id === id);
         setSites(prev => prev.filter(s => s.id !== id));
+        if (site) {
+          const newGlobalNotif: AppNotification = {
+            id: Math.random().toString(36).substr(2, 9),
+            message: `Cantiere rimosso: ${site.name}`,
+            timestamp: new Date().toISOString(),
+            readBy: []
+          };
+          setGlobalNotifications(prev => [...prev, newGlobalNotif]);
+        }
       }
     });
   };
@@ -484,6 +643,14 @@ export default function App() {
       setRequests([...requests, newReq]);
       setIsRequestModalOpen(false);
       setNewRequestOperatorName('');
+      
+      const newGlobalNotif: AppNotification = {
+        id: Math.random().toString(36).substr(2, 9),
+        message: `Nuova richiesta (${newRequestType}) creata per ${newRequestOperatorName.trim()} [Stato: ${newRequestStatus}]`,
+        timestamp: new Date().toISOString(),
+        readBy: []
+      };
+      setGlobalNotifications([...globalNotifications, newGlobalNotif]);
     }
   };
 
@@ -491,7 +658,17 @@ export default function App() {
      setConfirmAction({
        message: 'Rimuovere questa richiesta?',
        onConfirm: () => {
-         setRequests(prev => prev.filter(req => req.id !== id));
+         const req = requests.find(r => r.id === id);
+         setRequests(prev => prev.filter(r => r.id !== id));
+         if (req) {
+           const newGlobalNotif: AppNotification = {
+             id: Math.random().toString(36).substr(2, 9),
+             message: `Richiesta rimossa: ${req.operatorName} (${req.type})`,
+             timestamp: new Date().toISOString(),
+             readBy: []
+           };
+           setGlobalNotifications(prev => [...prev, newGlobalNotif]);
+         }
        }
      });
   };
@@ -503,9 +680,9 @@ export default function App() {
         if (a.id === absenceId) {
           const updatedDate = date || a.date;
           if (operatorId && operatorId !== a.coveredBy && !notified) {
-             const jolly = jollyOperators.find(j => j.id === operatorId);
-             if (jolly && a.site && updatedDate) {
-               triggerNotification(jolly.name, a.site, updatedDate, a.timeSlot);
+             const op = operators.find(j => j.id === operatorId);
+             if (op && a.site && updatedDate) {
+               triggerNotification(op.name, a.site, updatedDate, a.timeSlot);
                notified = true;
              }
           }
@@ -572,7 +749,13 @@ export default function App() {
   };
 
   const renderRichieste = () => {
-    const feriePermessi = requests.filter(req => req.type !== 'Malattia');
+    const feriePermessi = requests.filter(req => {
+      if (req.type === 'Malattia') return false;
+      if (requestsSearchStatus !== 'Tutti' && req.status !== requestsSearchStatus) return false;
+      if (requestsSearchQuery && !req.operatorName.toLowerCase().includes(requestsSearchQuery.toLowerCase())) return false;
+      if (requestsSearchMonth && !req.startDate.startsWith(requestsSearchMonth) && !req.endDate.startsWith(requestsSearchMonth)) return false;
+      return true;
+    });
     return (
     <>
       <div className="flex items-center justify-between mb-3 border-b border-slate-100 pb-2 shrink-0">
@@ -621,7 +804,13 @@ export default function App() {
   )};
 
   const renderMalattie = () => {
-    const malattie = requests.filter(req => req.type === 'Malattia');
+    const malattie = requests.filter(req => {
+      if (req.type !== 'Malattia') return false;
+      if (requestsSearchStatus !== 'Tutti' && req.status !== requestsSearchStatus) return false;
+      if (requestsSearchQuery && !req.operatorName.toLowerCase().includes(requestsSearchQuery.toLowerCase())) return false;
+      if (requestsSearchMonth && !req.startDate.startsWith(requestsSearchMonth) && !req.endDate.startsWith(requestsSearchMonth)) return false;
+      return true;
+    });
     return (
     <>
       <div className="flex items-center justify-between mb-3 border-b border-slate-100 pb-2 shrink-0">
@@ -669,7 +858,7 @@ export default function App() {
 
   const renderAssenze = () => {
     const filteredAbsences = absences.filter(abs => {
-      if (abs.coveredBy !== null) return false;
+      if (!showAllAbsences && abs.coveredBy !== null) return false;
       if (assenzeWeekStart) {
         const start = parseISO(assenzeWeekStart);
         const end = addDays(start, 6);
@@ -691,6 +880,15 @@ export default function App() {
           </h2>
           <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2 mr-2 border-r border-slate-100 pr-4">
+              <label className="flex items-center gap-1.5 cursor-pointer mr-2">
+                <input 
+                  type="checkbox"
+                  checked={showAllAbsences}
+                  onChange={(e) => setShowAllAbsences(e.target.checked)}
+                  className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                />
+                <span className="text-[10px] text-slate-500 font-bold uppercase">Mostra Tutti</span>
+              </label>
               <span className="text-[10px] text-slate-500 font-bold uppercase">Mese:</span>
               <input 
                 type="month"
@@ -728,6 +926,13 @@ export default function App() {
                     coveredBy: null
                   };
                   setAbsences([newAbsence, ...absences]);
+                  const newGlobalNotif: AppNotification = {
+                    id: Math.random().toString(36).substr(2, 9),
+                    message: `Creata nuova copertura manuale per il ${format(parseISO(newAbsence.date!), 'dd/MM/yyyy')}`,
+                    timestamp: new Date().toISOString(),
+                    readBy: []
+                  };
+                  setGlobalNotifications([...globalNotifications, newGlobalNotif]);
                 }}
                 className="bg-indigo-50 text-indigo-600 hover:bg-indigo-100 px-2 py-1 rounded text-[10px] font-bold flex items-center transition-colors"
               >
@@ -742,6 +947,7 @@ export default function App() {
               <tr className="text-left text-slate-400">
                 <th className="pb-2 font-medium">Data</th>
                 <th className="pb-2 font-medium">Cantiere</th>
+                <th className="pb-2 font-medium">Operatore Assente</th>
                 <th className="pb-2 font-medium">Fascia / Motivo</th>
                 <th className="pb-2 font-medium">Stato</th>
               </tr>
@@ -767,7 +973,11 @@ export default function App() {
               }}
             >
               {filteredAbsences.map((abs) => {
-                 const jollyName = abs.coveredBy ? jollyOperators.find(j => j.id === abs.coveredBy)?.name : null;
+                 const reqId = abs.id.split('_')[0];
+                 const req = requests.find(r => r.id === reqId);
+                 const originalOperator = req?.operatorName || 'Manuale';
+                 const assignedOp = abs.coveredBy ? operators.find(o => o.id === abs.coveredBy) : null;
+                 const assignedName = assignedOp ? assignedOp.name : null;
                  return (
                   <tr 
                     key={abs.id} 
@@ -813,6 +1023,9 @@ export default function App() {
                         onClick={(e) => e.stopPropagation()}
                       />
                     </td>
+                    <td className="py-2 text-slate-500 font-bold text-[10px] uppercase truncate max-w-[100px]" title={originalOperator}>
+                      {originalOperator}
+                    </td>
                     <td className="py-2">
                        <div className="flex items-center gap-1.5 flex-wrap">
                           <input 
@@ -837,20 +1050,61 @@ export default function App() {
                     </td>
                     <td className="py-2">
                       <div className="flex items-center justify-between">
-                        {jollyName ? (
-                          <span className="bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                            {jollyName.split(' (')[0]}
-                          </span>
+                        {assignedName ? (
+                          <div className="flex items-center gap-1">
+                            <span className="bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded text-[10px] font-bold">
+                              {assignedName.split(' (')[0]}
+                            </span>
+                            <button 
+                              onClick={() => handleAssignShift(abs.id, null, null)}
+                              className="text-emerald-600 hover:text-rose-500 hover:bg-rose-50 rounded-full p-0.5 transition-colors"
+                              title="Rimuovi copertura"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
                         ) : (
                           <div className="flex items-center gap-2">
-                            <span className="bg-rose-100 text-rose-600 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                              Scoperto
-                            </span>
+                            <select
+                              className="bg-rose-50 border border-rose-200 text-rose-700 text-[10px] font-bold px-1.5 py-0.5 rounded outline-none focus:ring-1 focus:ring-rose-400"
+                              value=""
+                              onChange={(e) => {
+                                if (e.target.value) {
+                                  handleAssignShift(abs.id, e.target.value, null);
+                                }
+                              }}
+                            >
+                              <option value="">Scoperto</option>
+                              <optgroup label="Jolly">
+                                {operators.filter(o => o.type === 'Jolly').map(o => (
+                                  <option key={o.id} value={o.id}>{o.name}</option>
+                                ))}
+                              </optgroup>
+                              <optgroup label="Standard">
+                                {operators.filter(o => o.type === 'Standard').map(o => (
+                                  <option key={o.id} value={o.id}>{o.name}</option>
+                                ))}
+                              </optgroup>
+                              <optgroup label="Esterno">
+                                {operators.filter(o => o.type === 'Esterno').map(o => (
+                                  <option key={o.id} value={o.id}>{o.name}</option>
+                                ))}
+                              </optgroup>
+                            </select>
                             <GripVertical className="w-3 h-3 text-slate-300" />
                           </div>
                         )}
                         {abs.id.startsWith('manual_') && (
-                          <button onClick={() => setAbsences(absences.filter(a => a.id !== abs.id))} className="text-slate-300 hover:text-rose-500 transition-colors">
+                          <button onClick={() => {
+                            setAbsences(absences.filter(a => a.id !== abs.id));
+                            const newGlobalNotif: AppNotification = {
+                              id: Math.random().toString(36).substr(2, 9),
+                              message: `Rimossa copertura manuale del ${format(parseISO(abs.date!), 'dd/MM/yyyy')}`,
+                              timestamp: new Date().toISOString(),
+                              readBy: []
+                            };
+                            setGlobalNotifications([...globalNotifications, newGlobalNotif]);
+                          }} className="text-slate-300 hover:text-rose-500 transition-colors">
                             <Trash2 className="w-4 h-4" />
                           </button>
                         )}
@@ -952,6 +1206,11 @@ export default function App() {
       return matchesSearch;
     });
 
+    const standardOrExternalCoveringOperators = operators.filter(o => 
+      (o.type === 'Standard' || o.type === 'Esterno') && 
+      absences.some(a => weekDates.includes(a.date) && a.coveredBy === o.id)
+    );
+
     const chartData = filteredJollies.map(jolly => {
       let weeklyHours = 0;
       absences.forEach(a => {
@@ -1045,6 +1304,21 @@ export default function App() {
                   <option key={j.id} value={j.name}>{j.name}</option>
                 ))}
               </select>
+              <div className="flex items-center gap-2 ml-2">
+                <input
+                  type="date"
+                  value={historyStartDate}
+                  onChange={(e) => setHistoryStartDate(e.target.value)}
+                  className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                />
+                <span className="text-slate-400 text-xs">-</span>
+                <input
+                  type="date"
+                  value={historyEndDate}
+                  onChange={(e) => setHistoryEndDate(e.target.value)}
+                  className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                />
+              </div>
             </div>
           )}
         </div>
@@ -1074,7 +1348,7 @@ export default function App() {
           </div>
         )}
 
-        <div className="flex-grow overflow-auto">
+        <div className="flex-grow overflow-x-auto overflow-y-visible">
           {weekDates.length === 0 ? (
              <div className="h-full flex items-center justify-center text-slate-400 text-xs italic">Nessun turno assegnato</div>
           ) : (
@@ -1100,7 +1374,7 @@ export default function App() {
                       return (
                       <div key={jolly.id} className="flex gap-2 min-h-[5rem]">
                          <div 
-                           className={cn("w-36 shrink-0 bg-white py-2 pl-4 pr-2 border rounded flex flex-col justify-center relative group transition-colors", draggedJollyRowId === jolly.id ? "opacity-50 border-indigo-400 bg-indigo-50" : "border-slate-200")}
+                           className={cn("w-36 shrink-0 bg-white py-2 pl-4 pr-2 border rounded flex flex-col justify-center relative group transition-colors", draggedJollyRowId === jolly.id ? "opacity-50 border-indigo-400 bg-indigo-50" : weeklyHours > 50 ? "border-rose-500 bg-rose-50 shadow-sm" : "border-slate-200")}
                            draggable
                            onDragStart={(e) => handleJollyRowDragStart(e, jolly.id)}
                            onDragOver={handleJollyRowDragOver}
@@ -1110,11 +1384,12 @@ export default function App() {
                                <GripVertical className="w-3 h-3" />
                             </div>
                             <div className="text-xs font-bold text-slate-700 flex items-center gap-1.5" title={jolly.name}>
-                               <div className={cn("w-2 h-2 rounded-full shrink-0", weeklyHours >= 50 ? "bg-red-500" : weeklyHours >= 40 ? "bg-orange-500" : "bg-emerald-500")} title={`${weeklyHours}h / 50h max`} />
+                               <div className={cn("w-2 h-2 rounded-full shrink-0", weeklyHours > 50 ? "bg-red-500 animate-pulse" : weeklyHours === 50 ? "bg-red-500" : weeklyHours >= 40 ? "bg-orange-500" : "bg-emerald-500")} title={`${weeklyHours}h / 50h max`} />
                                <span className="truncate">{jolly.name.split(' (')[0]}</span>
+                               {weeklyHours > 50 && <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" title="Attenzione: superato limite 50h" />}
                             </div>
                             <div className="text-[9px] text-indigo-500 font-semibold uppercase tracking-tighter mt-0.5">Operatore</div>
-                            <div className="mt-1 text-[10px] font-bold text-slate-500">Totale: <span className="text-indigo-600">{weeklyHours}h</span></div>
+                            <div className="mt-1 text-[10px] font-bold text-slate-500">Totale: <span className={cn(weeklyHours > 50 ? "text-rose-600" : "text-indigo-600")}>{weeklyHours}h</span></div>
                             {weeklyShifts.length > 0 && (
                               <button 
                                 onClick={() => simulateSMSToJolly(jolly, weeklyShifts)} 
@@ -1129,6 +1404,9 @@ export default function App() {
                             const dailyHours = assignedShifts.reduce((sum, s) => sum + calculateHours(s.timeSlot), 0);
                             
                             const isDragOver = dragOverTarget?.type === 'jolly' && dragOverTarget.id === jolly.id && dragOverTarget.date === date;
+                            const draggedAbsence = isDragOver && draggedItem ? absences.find(a => a.id === draggedItem) : null;
+                            const isCoperturaEsterna = operators.find(o => o.id === jolly.id)?.type === 'Esterno' || jolly.name.toUpperCase() === 'COPERTURA ESTERNA';
+                            const hasDragOverlap = draggedAbsence && !isCoperturaEsterna && assignedShifts.some(s => s.id !== draggedAbsence.id && doTimeSlotsOverlap(s.timeSlot, draggedAbsence.timeSlot));
 
                             if (assignedShifts.length > 0) {
                                return (
@@ -1137,7 +1415,8 @@ export default function App() {
                                     className={cn(
                                       "flex-1 p-2 border rounded flex flex-col overflow-hidden transition-all duration-200",
                                       "bg-emerald-50 border-emerald-100",
-                                      isDragOver && "ring-2 ring-indigo-400 bg-indigo-50/80 shadow-inner scale-[1.02]"
+                                      isDragOver && !hasDragOverlap && "ring-2 ring-indigo-400 bg-indigo-50/80 shadow-inner scale-[1.02]",
+                                      isDragOver && hasDragOverlap && "ring-2 ring-rose-500 bg-rose-100/80 shadow-inner scale-[1.02] animate-pulse"
                                     )}
                                     onDragOver={(e) => {
                                       e.preventDefault();
@@ -1155,6 +1434,7 @@ export default function App() {
                                         // verify if time overlaps with existing assigned shifts
                                         const draggedAbsence = absences.find(a => a.id === id);
                                         if (draggedAbsence) {
+                                          const isCoperturaEsterna = operators.find(o => o.id === jolly.id)?.type === 'Esterno' || jolly.name.toUpperCase() === 'COPERTURA ESTERNA';
                                           const isSameOperator = draggedAbsence.coveredBy === jolly.id;
                                           const isSameDay = isSameOperator && draggedAbsence.date === date;
                                           const isSameWeek = isSameOperator && weekDates.includes(draggedAbsence.date);
@@ -1162,7 +1442,7 @@ export default function App() {
                                           const newDailyHours = isSameDay ? dailyHours : dailyHours + shiftHours;
                                           const newWeeklyHours = isSameWeek ? weeklyHours : weeklyHours + shiftHours;
 
-                                          if (!e.shiftKey && (newDailyHours > 10 || newWeeklyHours > 50)) {
+                                          if (!e.shiftKey && !isCoperturaEsterna && (newDailyHours > 10 || newWeeklyHours > 50)) {
                                             alert(`Operazione bloccata: l'operatore supererebbe i limiti di ore (10h/giorno, 50h/settimana).\nOre previste: ${newDailyHours}h/giorno, ${newWeeklyHours}h/settimana.\nTieni premuto SHIFT durante il rilascio per forzare l'assegnazione.`);
                                             return;
                                           }
@@ -1171,20 +1451,24 @@ export default function App() {
                                             setConfirmAction({
                                               message: `Il cantiere è pianificato per il ${format(parseISO(draggedAbsence.date), 'dd/MM')}. Vuoi forzare al ${format(parseISO(date), 'dd/MM')}?`,
                                               onConfirm: () => {
-                                                const overlaps = assignedShifts.some(s => s.id !== id && doTimeSlotsOverlap(s.timeSlot, draggedAbsence.timeSlot));
-                                                if (overlaps) {
-                                                  alert("L'orario si sovrappone con un altro turno già assegnato.");
-                                                  return;
+                                                if (!isCoperturaEsterna) {
+                                                  const overlaps = assignedShifts.some(s => s.id !== id && doTimeSlotsOverlap(s.timeSlot, draggedAbsence.timeSlot));
+                                                  if (overlaps) {
+                                                    alert("L'orario si sovrappone con un altro turno già assegnato.");
+                                                    return;
+                                                  }
                                                 }
                                                 handleAssignShift(id, jolly.id, date);
                                               }
                                             });
                                             return;
                                           }
-                                          const overlaps = assignedShifts.some(s => s.id !== id && doTimeSlotsOverlap(s.timeSlot, draggedAbsence.timeSlot));
-                                          if (overlaps) {
-                                            alert("L'orario si sovrappone con un altro turno già assegnato.");
-                                            return;
+                                          if (!isCoperturaEsterna) {
+                                            const overlaps = assignedShifts.some(s => s.id !== id && doTimeSlotsOverlap(s.timeSlot, draggedAbsence.timeSlot));
+                                            if (overlaps) {
+                                              alert("L'orario si sovrappone con un altro turno già assegnato.");
+                                              return;
+                                            }
                                           }
                                         }
                                         handleAssignShift(id, jolly.id, date);
@@ -1194,7 +1478,8 @@ export default function App() {
                                      <div className="flex-grow space-y-1">
                                        {assignedShifts.map(shift => {
                                           const shiftHours = calculateHours(shift.timeSlot);
-                                          const hasOverlap = assignedShifts.some(s => s.id !== shift.id && doTimeSlotsOverlap(s.timeSlot, shift.timeSlot));
+                                          const isCoperturaEsterna = operators.find(o => o.id === jolly.id)?.type === 'Esterno' || jolly.name.toUpperCase() === 'COPERTURA ESTERNA';
+                                          const hasOverlap = !isCoperturaEsterna && assignedShifts.some(s => s.id !== shift.id && doTimeSlotsOverlap(s.timeSlot, shift.timeSlot));
                                           return (
                                             <div 
                                               key={shift.id} 
@@ -1273,6 +1558,7 @@ export default function App() {
                                       if (id) {
                                         const draggedAbsence = absences.find(a => a.id === id);
                                         if (draggedAbsence) {
+                                          const isCoperturaEsterna = operators.find(o => o.id === jolly.id)?.type === 'Esterno' || jolly.name.toUpperCase() === 'COPERTURA ESTERNA';
                                           const isSameOperator = draggedAbsence.coveredBy === jolly.id;
                                           const isSameDay = isSameOperator && draggedAbsence.date === date;
                                           const isSameWeek = isSameOperator && weekDates.includes(draggedAbsence.date);
@@ -1280,7 +1566,7 @@ export default function App() {
                                           const newDailyHours = isSameDay ? dailyHours : dailyHours + shiftHours;
                                           const newWeeklyHours = isSameWeek ? weeklyHours : weeklyHours + shiftHours;
 
-                                          if (!e.shiftKey && (newDailyHours > 10 || newWeeklyHours > 50)) {
+                                          if (!e.shiftKey && !isCoperturaEsterna && (newDailyHours > 10 || newWeeklyHours > 50)) {
                                             alert(`Operazione bloccata: l'operatore supererebbe i limiti di ore (10h/giorno, 50h/settimana).\nOre previste: ${newDailyHours}h/giorno, ${newWeeklyHours}h/settimana.\nTieni premuto SHIFT durante il rilascio per forzare l'assegnazione.`);
                                             return;
                                           }
@@ -1307,18 +1593,110 @@ export default function App() {
                       </div>
                    )})}
                 </div>
+                
+                {standardOrExternalCoveringOperators.length > 0 && (
+                  <div className="space-y-2 pb-4 mt-6">
+                    <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest px-2 mb-2">Operatori Standard / Esterni Assegnati</h3>
+                    {standardOrExternalCoveringOperators.map(op => {
+                      const weeklyShifts = absences.filter(a => weekDates.includes(a.date) && a.coveredBy === op.id);
+                      const weeklyHours = weeklyShifts.reduce((sum, s) => sum + calculateHours(s.timeSlot), 0);
+
+                      return (
+                      <div key={op.id} className="flex gap-2 min-h-[5rem]">
+                         <div className={cn("w-36 shrink-0 bg-white py-2 pl-4 pr-2 border rounded flex flex-col justify-center relative group transition-colors", weeklyHours > 50 ? "border-rose-500 bg-rose-50 shadow-sm" : "border-slate-200")}>
+                            <div className="text-xs font-bold text-slate-700 flex items-center gap-1.5" title={op.name}>
+                               <div className={cn("w-2 h-2 rounded-full shrink-0", weeklyHours > 50 ? "bg-red-500 animate-pulse" : weeklyHours === 50 ? "bg-red-500" : weeklyHours >= 40 ? "bg-orange-500" : "bg-emerald-500")} title={`${weeklyHours}h / 50h max`} />
+                               <span className="truncate">{op.name.split(' (')[0]}</span>
+                               {weeklyHours > 50 && <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" title="Attenzione: superato limite 50h" />}
+                            </div>
+                            <div className="text-[9px] text-slate-500 font-semibold uppercase tracking-tighter mt-0.5">{op.type}</div>
+                            <div className="mt-1 text-[10px] font-bold text-slate-500">Totale: <span className={cn(weeklyHours > 50 ? "text-rose-600" : "text-slate-600")}>{weeklyHours}h</span></div>
+                         </div>
+                         {weekDates.map(date => {
+                            const assignedShifts = absences.filter(a => a.date === date && a.coveredBy === op.id);
+                            
+                            if (assignedShifts.length > 0) {
+                               return (
+                                  <div 
+                                    key={date} 
+                                    className="flex-1 p-2 border rounded flex flex-col overflow-hidden transition-all duration-200 bg-emerald-50 border-emerald-100"
+                                  >
+                                     <div className="flex-grow space-y-1">
+                                       {assignedShifts.map(shift => {
+                                          const shiftHours = calculateHours(shift.timeSlot);
+                                          return (
+                                            <div 
+                                              key={shift.id} 
+                                              className="flex gap-1 p-1 -mx-1 rounded cursor-move transition-all duration-200 group relative hover:bg-emerald-100/50"
+                                              draggable
+                                              onDragStart={(e) => {
+                                                e.dataTransfer.setData('absenceId', shift.id);
+                                                setTimeout(() => setDraggedItem(shift.id), 0);
+                                              }}
+                                              onDragEnd={() => {
+                                                setDraggedItem(null);
+                                                setDragOverTarget(null);
+                                              }}
+                                            >
+                                              <div className="flex-grow flex flex-col min-w-0">
+                                                <input 
+                                                  type="text" 
+                                                  value={shift.site}
+                                                  readOnly
+                                                  className="text-[10px] font-bold text-emerald-800 bg-transparent border-none p-0 focus:ring-0 truncate cursor-pointer pointer-events-none"
+                                                />
+                                                <div className="text-[9px] font-semibold text-emerald-600 truncate mt-0.5 pointer-events-none">
+                                                  {shiftHours}h ({shift.timeSlot})
+                                                </div>
+                                              </div>
+                                              <button 
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  handleAssignShift(shift.id, null, null);
+                                                }}
+                                                className="opacity-0 group-hover:opacity-100 text-emerald-600 hover:text-rose-500 hover:bg-rose-50 rounded-full p-1 transition-all"
+                                                title="Rimuovi turno"
+                                              >
+                                                <X className="w-3 h-3" />
+                                              </button>
+                                            </div>
+                                          );
+                                       })}
+                                     </div>
+                                  </div>
+                               )
+                            } else {
+                               return (
+                                  <div 
+                                    key={date} 
+                                    className="flex-1 p-2 border border-slate-100 bg-slate-50/50 rounded flex flex-col transition-colors duration-200"
+                                  >
+                                     <div className="h-full flex items-center justify-center text-[9px] text-slate-300 italic uppercase pointer-events-none">Riposo</div>
+                                  </div>
+                               )
+                            }
+                         })}
+                      </div>
+                   )})}
+                </div>
+                )}
              </div>
           )}
         </div>
         </>
       ) : (
-        <div className="flex-grow overflow-auto bg-slate-50/50 rounded-lg border border-slate-200">
+        <div className="flex-grow bg-slate-50/50 rounded-lg border border-slate-200">
            <div className="p-4 space-y-4">
               {sortedJollyOperators
                 .filter(jolly => jollySearchQuery ? jolly.name.toLowerCase().includes(jollySearchQuery.toLowerCase()) : true)
                 .map(jolly => {
                   const coveredAbsences = absences
-                     .filter(a => a.coveredBy === jolly.id && a.date)
+                     .filter(a => {
+                        if (a.coveredBy !== jolly.id || !a.date) return false;
+                        if (historyStartDate && a.date < historyStartDate) return false;
+                        if (historyEndDate && a.date > historyEndDate) return false;
+                        return true;
+                     })
                      .sort((a, b) => new Date(b.date || '').getTime() - new Date(a.date || '').getTime());
   
                   if (coveredAbsences.length === 0) return null;
@@ -1377,6 +1755,12 @@ export default function App() {
   );
 };
 
+  const canViewTab = (tab: Tab) => {
+    if (!userProfile) return true; // Show all if profile not loaded yet
+    if (userProfile.isAdmin) return true;
+    return (userProfile.allowedTabs || []).includes(tab);
+  };
+
   if (authLoading) {
     return <div className="h-[100dvh] flex items-center justify-center bg-slate-50"><div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div></div>;
   }
@@ -1386,7 +1770,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-[100dvh] bg-slate-50 flex flex-col p-4 md:p-6 font-sans overflow-hidden">
+    <div className="min-h-[100dvh] bg-slate-50 flex flex-col p-4 md:p-6 font-sans">
       <header className="flex flex-col md:flex-row md:items-center justify-between mb-4 md:mb-6 shrink-0 gap-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg shrink-0">
@@ -1394,7 +1778,7 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-xl font-bold text-slate-800 leading-tight">Gestione Turni Jolly</h1>
-            <p className="text-xs text-slate-500 font-medium tracking-wide uppercase">Area Riservata</p>
+            <p className="text-xs text-slate-500 font-medium tracking-wide uppercase">Area Riservata {userProfile ? `- Ciao ${userProfile.username}` : ''}</p>
           </div>
         </div>
         <div className="flex flex-wrap gap-2 md:gap-3 items-center">
@@ -1402,9 +1786,70 @@ export default function App() {
             <span className="text-[10px] text-indigo-600 font-bold uppercase tracking-tighter">Status Sincronizzazione</span>
             <span className="text-sm font-semibold text-slate-700 italic">Pronto</span>
           </div>
+          
+          <div className="relative">
+            <button 
+              onClick={() => setShowNotifications(!showNotifications)}
+              className="relative p-2 bg-white border border-slate-200 rounded-md text-slate-600 hover:bg-slate-50 transition-colors"
+            >
+              <Bell className="w-4 h-4" />
+              {unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 w-3 h-3 bg-rose-500 rounded-full border-2 border-white animate-pulse" />
+              )}
+            </button>
+            
+            {showNotifications && (
+              <div className="absolute right-0 mt-2 w-80 bg-white border border-slate-200 rounded-lg shadow-xl z-50 overflow-hidden">
+                <div className="p-3 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+                  <span className="text-xs font-bold text-slate-700 uppercase">Notifiche</span>
+                  {unreadCount > 0 && (
+                    <button 
+                      onClick={() => {
+                        if (!user) return;
+                        const updated = globalNotifications.map(n => ({ ...n, readBy: [...(n.readBy || []), user.uid] }));
+                        setGlobalNotifications(updated);
+                      }}
+                      className="text-[10px] text-indigo-600 font-semibold hover:underline"
+                    >
+                      Segna tutte come lette
+                    </button>
+                  )}
+                </div>
+                <div className="max-h-64 overflow-y-auto">
+                  {globalNotifications.length === 0 ? (
+                    <div className="p-4 text-center text-xs text-slate-500">Nessuna notifica.</div>
+                  ) : (
+                    globalNotifications.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).map(notif => {
+                      const isRead = (notif.readBy || []).includes(user?.uid);
+                      return (
+                        <div 
+                          key={notif.id} 
+                          onClick={() => handleMarkAsRead(notif.id)}
+                          className={cn("p-3 border-b border-slate-100 cursor-pointer transition-colors hover:bg-slate-50", !isRead ? "bg-indigo-50/30" : "")}
+                        >
+                          <div className="flex justify-between items-start mb-1">
+                            <span className="text-[10px] text-slate-400">{format(parseISO(notif.timestamp), 'dd/MM HH:mm')}</span>
+                            {!isRead && <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-1"></span>}
+                          </div>
+                          <p className="text-xs text-slate-700">{notif.message}</p>
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {userProfile?.isAdmin && (
+            <button onClick={() => setIsUsersModalOpen(true)} className="bg-white border border-slate-200 px-3 md:px-4 py-2 rounded-md text-xs md:text-sm font-semibold text-slate-600 flex items-center gap-2 shadow-sm hover:bg-slate-50 transition-colors flex-1 md:flex-none justify-center">
+              <User className="w-4 h-4 text-emerald-500" />
+              <span className="hidden md:inline">Permessi</span>
+            </button>
+          )}
           <button onClick={() => setIsRegistryModalOpen(true)} className="bg-white border border-slate-200 px-3 md:px-4 py-2 rounded-md text-xs md:text-sm font-semibold text-slate-600 flex items-center gap-2 shadow-sm hover:bg-slate-50 transition-colors flex-1 md:flex-none justify-center">
             <Users className="w-4 h-4 text-indigo-500" />
-            Anagrafiche
+            <span className="hidden md:inline">Anagrafiche</span>
           </button>
           <button onClick={handleClearAssignments} className="bg-white border border-slate-200 px-3 md:px-4 py-2 rounded-md text-xs md:text-sm font-semibold text-slate-600 flex items-center gap-2 shadow-sm hover:bg-slate-50 transition-colors flex-1 md:flex-none justify-center">
             <XSquare className="w-4 h-4 text-rose-500" />
@@ -1423,45 +1868,94 @@ export default function App() {
 
       {/* Mobile Tabs */}
       <div className="md:hidden flex gap-2 mb-4 overflow-x-auto shrink-0 pb-1 scrollbar-hide">
-        <button
-          onClick={() => setActiveTab('richieste')}
-          className={cn("px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap transition-colors", activeTab === 'richieste' ? "bg-indigo-100 text-indigo-700" : "bg-white border border-slate-200 text-slate-600")}
-        >
-          Foglio 1: Richieste
-        </button>
-        <button
-          onClick={() => setActiveTab('malattie')}
-          className={cn("px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap transition-colors", activeTab === 'malattie' ? "bg-indigo-100 text-indigo-700" : "bg-white border border-slate-200 text-slate-600")}
-        >
-          Foglio 2: Malattie
-        </button>
-        <button
-          onClick={() => setActiveTab('assenze')}
-          className={cn("px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap transition-colors", activeTab === 'assenze' ? "bg-indigo-100 text-indigo-700" : "bg-white border border-slate-200 text-slate-600")}
-        >
-          Foglio 3: Assenze
-        </button>
-        <button
-          onClick={() => setActiveTab('calendario')}
-          className={cn("px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap transition-colors", activeTab === 'calendario' ? "bg-indigo-100 text-indigo-700" : "bg-white border border-slate-200 text-slate-600")}
-        >
-          Foglio 4: Calendario
-        </button>
+        {canViewTab('richieste') && (
+          <button
+            onClick={() => setActiveTab('richieste')}
+            className={cn("px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap transition-colors", activeTab === 'richieste' ? "bg-indigo-100 text-indigo-700" : "bg-white border border-slate-200 text-slate-600")}
+          >
+            Foglio 1: Richieste
+          </button>
+        )}
+        {canViewTab('malattie') && (
+          <button
+            onClick={() => setActiveTab('malattie')}
+            className={cn("px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap transition-colors", activeTab === 'malattie' ? "bg-indigo-100 text-indigo-700" : "bg-white border border-slate-200 text-slate-600")}
+          >
+            Foglio 2: Malattie
+          </button>
+        )}
+        {canViewTab('assenze') && (
+          <button
+            onClick={() => setActiveTab('assenze')}
+            className={cn("px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap transition-colors", activeTab === 'assenze' ? "bg-indigo-100 text-indigo-700" : "bg-white border border-slate-200 text-slate-600")}
+          >
+            Foglio 3: Assenze
+          </button>
+        )}
+        {canViewTab('calendario') && (
+          <button
+            onClick={() => setActiveTab('calendario')}
+            className={cn("px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap transition-colors", activeTab === 'calendario' ? "bg-indigo-100 text-indigo-700" : "bg-white border border-slate-200 text-slate-600")}
+          >
+            Foglio 4: Calendario
+          </button>
+        )}
       </div>
 
-      <main className="grid grid-cols-1 md:grid-cols-12 md:grid-rows-6 gap-4 flex-grow overflow-hidden">
-        <div className={cn("md:col-span-3 md:row-span-3 bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex-col overflow-hidden", activeTab === 'richieste' ? 'flex' : 'hidden md:flex')}>
-          {renderRichieste()}
+      <main className="flex flex-col gap-4 flex-grow">
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-4 shrink-0">
+          <div className={cn("md:col-span-12 bg-white rounded-xl border border-slate-200 shadow-sm p-3 flex-col", (activeTab === 'richieste' || activeTab === 'malattie') && (canViewTab('richieste') || canViewTab('malattie')) ? 'flex' : 'hidden md:flex')}>
+             <div className="flex flex-wrap items-center gap-4">
+                <span className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1.5"><Search className="w-4 h-4" /> Filtri Fogli 1 & 2</span>
+                <input 
+                  type="text"
+                  placeholder="Cerca operatore..."
+                  value={requestsSearchQuery}
+                  onChange={e => setRequestsSearchQuery(e.target.value)}
+                  className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 w-48"
+                />
+                <select
+                  value={requestsSearchStatus}
+                  onChange={e => setRequestsSearchStatus(e.target.value)}
+                  className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="Tutti">Tutti gli stati</option>
+                  <option value="In attesa">In attesa</option>
+                  <option value="Approvata">Approvata</option>
+                  <option value="Rifiutata">Rifiutata</option>
+                </select>
+                <input 
+                  type="month"
+                  value={requestsSearchMonth}
+                  onChange={e => setRequestsSearchMonth(e.target.value)}
+                  className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                />
+                {(requestsSearchQuery || requestsSearchStatus !== 'Tutti' || requestsSearchMonth) && (
+                  <button onClick={() => { setRequestsSearchQuery(''); setRequestsSearchStatus('Tutti'); setRequestsSearchMonth(''); }} className="text-[10px] text-slate-400 hover:text-slate-600 font-bold uppercase transition-colors">Reset</button>
+                )}
+             </div>
+          </div>
+          {canViewTab('richieste') && (
+            <div className={cn("md:col-span-6 bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex-col overflow-hidden", activeTab === 'richieste' ? 'flex h-[calc(100vh-200px)]' : 'hidden md:flex md:h-[300px]')}>
+              {renderRichieste()}
+            </div>
+          )}
+          {canViewTab('malattie') && (
+            <div className={cn("md:col-span-6 bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex-col overflow-hidden", activeTab === 'malattie' ? 'flex h-[calc(100vh-200px)]' : 'hidden md:flex md:h-[300px]')}>
+              {renderMalattie()}
+            </div>
+          )}
+          {canViewTab('assenze') && (
+            <div className={cn("md:col-span-12 bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex-col overflow-hidden", activeTab === 'assenze' ? 'flex h-[calc(100vh-200px)]' : 'hidden md:flex md:h-[350px]')}>
+              {renderAssenze()}
+            </div>
+          )}
         </div>
-        <div className={cn("md:col-span-3 md:row-span-3 bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex-col overflow-hidden", activeTab === 'malattie' ? 'flex' : 'hidden md:flex')}>
-          {renderMalattie()}
-        </div>
-        <div className={cn("md:col-span-6 md:row-span-3 bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex-col overflow-hidden", activeTab === 'assenze' ? 'flex' : 'hidden md:flex')}>
-          {renderAssenze()}
-        </div>
-        <div className={cn("md:col-span-12 md:row-span-3 bg-white rounded-xl border-2 border-indigo-200 shadow-lg p-4 flex-col overflow-hidden", activeTab === 'calendario' ? 'flex' : 'hidden md:flex')}>
-          {renderCalendario()}
-        </div>
+        {canViewTab('calendario') && (
+          <div className={cn("bg-white rounded-xl border-2 border-indigo-200 shadow-lg p-4 flex-col overflow-visible", activeTab === 'calendario' ? 'flex' : 'hidden md:flex')}>
+            {renderCalendario()}
+          </div>
+        )}
       </main>
 
       <footer className="mt-4 flex justify-between items-center bg-slate-800 text-white p-3 rounded-lg shadow-inner shrink-0 hidden md:flex">
@@ -1501,6 +1995,140 @@ export default function App() {
               >
                 Conferma
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Users Permissions Modal */}
+      {isUsersModalOpen && userProfile?.isAdmin && (
+        <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg overflow-hidden flex flex-col max-h-[80vh]">
+            <div className="flex items-center justify-between p-4 border-b border-slate-100 bg-slate-50">
+              <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                <User className="w-5 h-5 text-emerald-600" />
+                Permessi Utenti
+              </h3>
+              <button onClick={() => setIsUsersModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="p-4 overflow-y-auto space-y-4">
+              <form onSubmit={handleCreateUser} className="bg-white border border-indigo-100 rounded-lg p-4 shadow-sm mb-6">
+                <h4 className="text-sm font-bold text-indigo-700 mb-3 flex items-center gap-2">
+                  <Plus className="w-4 h-4" /> Crea Nuovo Utente
+                </h4>
+                {newUserError && (
+                  <div className="text-xs text-rose-600 bg-rose-50 p-2 rounded mb-3 border border-rose-100">
+                    {newUserError}
+                  </div>
+                )}
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Nome Utente</label>
+                    <input 
+                      type="text" 
+                      value={newUsername} 
+                      onChange={e => setNewUsername(e.target.value)} 
+                      className="w-full text-sm border-slate-200 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                      placeholder="es. mario.rossi"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Password</label>
+                    <input 
+                      type="password" 
+                      value={newPassword} 
+                      onChange={e => setNewPassword(e.target.value)} 
+                      className="w-full text-sm border-slate-200 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                      placeholder="min. 6 caratteri"
+                    />
+                  </div>
+                </div>
+                
+                <div className="mb-3">
+                  <label className="block text-xs font-semibold text-slate-600 mb-2">Permessi (Fogli accessibili)</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(['richieste', 'malattie', 'assenze', 'calendario'] as Tab[]).map(tab => (
+                      <label key={tab} className="flex items-center gap-2 text-xs text-slate-700">
+                        <input 
+                          type="checkbox"
+                          checked={newUserTabs.includes(tab)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setNewUserTabs([...newUserTabs, tab]);
+                            } else {
+                              setNewUserTabs(newUserTabs.filter(t => t !== tab));
+                            }
+                          }}
+                          className="rounded text-indigo-600 focus:ring-indigo-500 border-slate-300"
+                        />
+                        Foglio: {tab}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                
+                <div className="flex items-center justify-between mt-4 pt-3 border-t border-slate-100">
+                  <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                    <input 
+                      type="checkbox"
+                      checked={newUserIsAdmin}
+                      onChange={(e) => setNewUserIsAdmin(e.target.checked)}
+                      className="rounded text-emerald-600 focus:ring-emerald-500 border-slate-300"
+                    />
+                    Rendi Amministratore
+                  </label>
+                  
+                  <button
+                    type="submit"
+                    disabled={isCreatingUser}
+                    className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-bold rounded-md hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                  >
+                    {isCreatingUser ? 'Creazione...' : 'Crea Utente'}
+                  </button>
+                </div>
+              </form>
+
+              <h4 className="text-sm font-bold text-slate-700 border-b pb-2">Utenti Esistenti</h4>
+              {allUsers.length === 0 ? (
+                <div className="text-center p-4 text-sm text-slate-500">Caricamento utenti...</div>
+              ) : (
+                allUsers.map(u => (
+                  <div key={u.uid} className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                    <div className="flex justify-between items-center mb-3">
+                      <div>
+                        <div className="font-bold text-slate-700 text-sm">{u.username}</div>
+                        <div className="text-[10px] text-slate-500 font-mono">{u.uid}</div>
+                      </div>
+                      {u.isAdmin && (
+                        <span className="bg-emerald-100 text-emerald-700 text-[10px] px-2 py-0.5 rounded font-bold uppercase tracking-wider">Admin</span>
+                      )}
+                    </div>
+                    
+                    {!u.isAdmin && (
+                      <div className="grid grid-cols-2 gap-2">
+                        {(['richieste', 'malattie', 'assenze', 'calendario'] as Tab[]).map(tab => {
+                          const hasAccess = (u.allowedTabs || []).includes(tab);
+                          return (
+                            <label key={tab} className="flex items-center gap-2 text-xs font-semibold text-slate-600 cursor-pointer">
+                              <input 
+                                type="checkbox" 
+                                checked={hasAccess} 
+                                onChange={() => toggleUserTab(u.uid, tab)}
+                                className="rounded text-indigo-600 focus:ring-indigo-500 border-slate-300 bg-white"
+                              />
+                              Foglio: {tab}
+                            </label>
+                          )
+                        })}
+                      </div>
+                    )}
+                    {u.isAdmin && <p className="text-xs text-slate-500 italic mt-1">Gli amministratori hanno accesso a tutti i fogli e non possono essere limitati.</p>}
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>
@@ -1558,7 +2186,11 @@ export default function App() {
                           onChange={(e) => handleUpdateOperatorName(operator.id, e.target.value)}
                           className="flex-grow text-sm font-semibold text-slate-700 bg-white border border-slate-200 rounded-md px-3 py-2 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                         />
-                        <span className={cn("text-[10px] px-2 py-1 rounded font-bold uppercase tracking-wider shrink-0", operator.type === 'Jolly' ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-600")}>
+                        <span className={cn("text-[10px] px-2 py-1 rounded font-bold uppercase tracking-wider shrink-0", 
+                          operator.type === 'Jolly' ? "bg-amber-100 text-amber-700" : 
+                          operator.type === 'Esterno' ? "bg-indigo-100 text-indigo-700" : 
+                          "bg-slate-100 text-slate-600"
+                        )}>
                           {operator.type}
                         </span>
                       </div>
@@ -1589,11 +2221,12 @@ export default function App() {
                     />
                     <select
                       value={newOperatorType}
-                      onChange={(e) => setNewOperatorType(e.target.value as 'Standard' | 'Jolly')}
+                      onChange={(e) => setNewOperatorType(e.target.value as 'Standard' | 'Jolly' | 'Esterno')}
                       className="text-sm text-slate-700 bg-white border border-slate-200 rounded-md px-3 py-2 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                     >
                       <option value="Standard">Standard</option>
                       <option value="Jolly">Jolly</option>
+                      <option value="Esterno">Esterno</option>
                     </select>
                     <button 
                       onClick={handleAddOperator}
@@ -1673,7 +2306,7 @@ export default function App() {
                 </div>
                 <div className="p-4 overflow-y-auto flex-grow space-y-3">
                   {sites
-                    .filter(site => site.name.toLowerCase().includes(siteSearchQuery.toLowerCase()) || site.address.toLowerCase().includes(siteSearchQuery.toLowerCase()) || site.city.toLowerCase().includes(siteSearchQuery.toLowerCase()))
+                    .filter(site => (site.name || '').toLowerCase().includes(siteSearchQuery.toLowerCase()) || (site.address || '').toLowerCase().includes(siteSearchQuery.toLowerCase()) || (site.city || '').toLowerCase().includes(siteSearchQuery.toLowerCase()))
                     .map((site) => (
                     <div key={site.id} className="border border-slate-200 rounded-md overflow-hidden bg-white">
                       <div className="flex items-center gap-2 p-2 bg-slate-50 border-b border-slate-100">
@@ -1994,7 +2627,7 @@ export default function App() {
 
       {/* Notifications overlay */}
       <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
-        {notifications.map(n => (
+        {toastNotifications.map(n => (
           <div key={n.id} className="p-4 rounded-md shadow-lg border text-sm max-w-sm flex items-start justify-between bg-white text-slate-800 border-slate-200 animate-in slide-in-from-right-8 duration-300">
             <div className="flex gap-3 items-start">
               <div className="mt-0.5 p-1.5 bg-indigo-50 rounded text-indigo-600">
@@ -2005,7 +2638,7 @@ export default function App() {
                 <span className="leading-snug whitespace-pre-line">{n.message}</span>
               </div>
             </div>
-            <button onClick={() => setNotifications(prev => prev.filter(x => x.id !== n.id))} className="text-slate-400 hover:text-slate-600 ml-4"><X className="w-4 h-4"/></button>
+            <button onClick={() => setToastNotifications(prev => prev.filter(x => x.id !== n.id))} className="text-slate-400 hover:text-slate-600 ml-4"><X className="w-4 h-4"/></button>
           </div>
         ))}
       </div>

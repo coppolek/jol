@@ -25,7 +25,7 @@ export interface Absence {
 export interface Operator {
   id: string;
   name: string;
-  type: 'Standard' | 'Jolly';
+  type: 'Standard' | 'Jolly' | 'Esterno';
 }
 
 export interface SiteSchedule {
@@ -44,9 +44,22 @@ export interface Site {
   assignedOperatorId: string | null;
 }
 
-// Keep JollyOperator for backwards compatibility during refactor, or we can just replace it.
 export interface JollyOperator {
   id: string;
   name: string;
   order?: number;
+}
+
+export interface UserProfile {
+  uid: string;
+  username: string;
+  allowedTabs: ('richieste' | 'malattie' | 'assenze' | 'calendario')[];
+  isAdmin: boolean;
+}
+
+export interface AppNotification {
+  id: string;
+  message: string;
+  timestamp: string;
+  readBy: string[];
 }

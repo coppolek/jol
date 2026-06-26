@@ -9,16 +9,20 @@ export function useFirestoreSync<T extends { id: string }>(collectionName: strin
     const unsub = onSnapshot(collection(db, collectionName), (snap) => {
       const isSeeded = localStorage.getItem(`seeded_${collectionName}`);
       if (snap.empty && !isSeeded) {
-         const batch = writeBatch(db);
          const colRef = collection(db, collectionName);
-         initialData.forEach(item => {
-           // Sanitize item for Firestore (remove undefined)
-           const cleanItem = JSON.parse(JSON.stringify(item));
-           batch.set(doc(colRef, item.id), cleanItem);
-         });
-         batch.commit().then(() => {
+         const commitInitialBatches = async () => {
+           for (let i = 0; i < initialData.length; i += 400) {
+             const chunk = initialData.slice(i, i + 400);
+             const batch = writeBatch(db);
+             chunk.forEach(item => {
+               const cleanItem = JSON.parse(JSON.stringify(item));
+               batch.set(doc(colRef, item.id), cleanItem);
+             });
+             await batch.commit().catch(console.error);
+           }
            localStorage.setItem(`seeded_${collectionName}`, 'true');
-         }).catch(console.error);
+         };
+         commitInitialBatches();
       } else {
          const docs = snap.docs.map(d => ({ id: d.id, ...d.data() } as T));
          // Optional: sort by id or something to keep order stable if needed
@@ -35,28 +39,41 @@ export function useFirestoreSync<T extends { id: string }>(collectionName: strin
     setData((prevData) => {
       const newData = typeof newDataOrUpdater === 'function' ? newDataOrUpdater(prevData) : newDataOrUpdater;
       
-      const batch = writeBatch(db);
       const colRef = collection(db, collectionName);
-      
       const prevMap = new Map<string, T>(prevData.map(item => [item.id, item]));
       
+      const operations: { type: 'set' | 'update' | 'delete', id: string, data?: any }[] = [];
+
       newData.forEach(item => {
         const cleanItem = JSON.parse(JSON.stringify(item));
         const prevItem = prevMap.get(item.id);
         
         if (!prevItem) {
-          batch.set(doc(colRef, item.id), cleanItem);
+          operations.push({ type: 'set', id: item.id, data: cleanItem });
         } else if (JSON.stringify(cleanItem) !== JSON.stringify(prevItem)) {
-          batch.update(doc(colRef, item.id), cleanItem);
+          operations.push({ type: 'update', id: item.id, data: cleanItem });
         }
         prevMap.delete(item.id);
       });
       
       prevMap.forEach((_, id) => {
-        batch.delete(doc(colRef, id));
+        operations.push({ type: 'delete', id });
       });
-      
-      batch.commit().catch(console.error);
+
+      const commitBatches = async () => {
+        for (let i = 0; i < operations.length; i += 400) {
+          const chunk = operations.slice(i, i + 400);
+          const batch = writeBatch(db);
+          chunk.forEach(op => {
+            if (op.type === 'set') batch.set(doc(colRef, op.id), op.data);
+            else if (op.type === 'update') batch.update(doc(colRef, op.id), op.data);
+            else if (op.type === 'delete') batch.delete(doc(colRef, op.id));
+          });
+          await batch.commit().catch(console.error);
+        }
+      };
+
+      commitBatches();
       
       return newData;
     });
