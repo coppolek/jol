@@ -48,4 +48,5 @@ export interface Site {
 export interface JollyOperator {
   id: string;
   name: string;
+  order?: number;
 }

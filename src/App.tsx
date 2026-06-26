@@ -45,8 +45,7 @@ export default function App() {
     
     const shiftDetails = sortedShifts.map(s => {
       const dateFormatted = format(parseISO(s.date || ''), 'dd/MM');
-      const site = sites.find(site => site.id === s.siteId);
-      return `${dateFormatted}: ${site?.name || s.site} (${s.timeSlot})`;
+      return `${dateFormatted}: ${s.site} (${s.timeSlot})`;
     }).join('\n');
 
     const id = Math.random().toString(36).substr(2, 9);
@@ -167,6 +166,7 @@ export default function App() {
   const [expandedSiteId, setExpandedSiteId] = useState<string | null>(null);
   const [showStats, setShowStats] = useState(false);
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
+  const [draggedJollyRowId, setDraggedJollyRowId] = useState<string | null>(null);
   const [dragOverTarget, setDragOverTarget] = useState<{ type: 'jolly' | 'unassigned', id?: string, date?: string } | null>(null);
   const [calendarioView, setCalendarioView] = useState<'weekly' | 'history'>('weekly');
   
@@ -312,11 +312,10 @@ export default function App() {
           absence.coveredBy = selectedJolly.id;
           assignmentsMade++;
 
-          const site = sites.find(s => s.id === absence.siteId);
-          if (site && absence.date) {
+          if (absence.site && absence.date) {
             // Introduce a slight delay to stagger notifications if there are many
             setTimeout(() => {
-              triggerNotification(selectedJolly.name, site.name, absence.date, absence.timeSlot);
+              triggerNotification(selectedJolly.name, absence.site, absence.date, absence.timeSlot);
             }, assignmentsMade * 200);
           }
         }
@@ -357,7 +356,8 @@ export default function App() {
       setNewOperatorName('');
       
       if (newOperatorType === 'Jolly') {
-        setJollyOperators([...jollyOperators, { id: newOp.id, name: newOp.name }]);
+        const maxOrder = Math.max(0, ...jollyOperators.map(j => j.order ?? 0));
+        setJollyOperators([...jollyOperators, { id: newOp.id, name: newOp.name, order: maxOrder + 1 }]);
       }
     }
   };
@@ -504,9 +504,8 @@ export default function App() {
           const updatedDate = date || a.date;
           if (operatorId && operatorId !== a.coveredBy && !notified) {
              const jolly = jollyOperators.find(j => j.id === operatorId);
-             const site = sites.find(s => s.id === a.siteId);
-             if (jolly && site && updatedDate) {
-               triggerNotification(jolly.name, site.name, updatedDate, a.timeSlot);
+             if (jolly && a.site && updatedDate) {
+               triggerNotification(jolly.name, a.site, updatedDate, a.timeSlot);
                notified = true;
              }
           }
@@ -886,7 +885,49 @@ export default function App() {
       }
     };
 
-    const filteredJollies = jollyOperators.filter(jolly => {
+    const handleJollyRowDragStart = (e: React.DragEvent, id: string) => {
+      e.stopPropagation();
+      e.dataTransfer.effectAllowed = 'move';
+      // Use a transparent image so the drag ghost doesn't obscure the screen too much
+      setDraggedJollyRowId(id);
+    };
+
+    const handleJollyRowDragOver = (e: React.DragEvent) => {
+      if (draggedJollyRowId) {
+        e.preventDefault();
+      }
+    };
+
+    const handleJollyRowDrop = (e: React.DragEvent, targetId: string) => {
+      if (!draggedJollyRowId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      
+      if (draggedJollyRowId === targetId) {
+        setDraggedJollyRowId(null);
+        return;
+      }
+
+      const sortedJollies = [...jollyOperators].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      const sourceIndex = sortedJollies.findIndex(j => j.id === draggedJollyRowId);
+      const targetIndex = sortedJollies.findIndex(j => j.id === targetId);
+
+      if (sourceIndex === -1 || targetIndex === -1) {
+        setDraggedJollyRowId(null);
+        return;
+      }
+
+      const [removed] = sortedJollies.splice(sourceIndex, 1);
+      sortedJollies.splice(targetIndex, 0, removed);
+
+      const updatedJollies = sortedJollies.map((j, i) => ({ ...j, order: i }));
+      setJollyOperators(updatedJollies);
+      setDraggedJollyRowId(null);
+    };
+
+    const sortedJollyOperators = [...jollyOperators].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+    const filteredJollies = sortedJollyOperators.filter(jolly => {
       const matchesSearch = jolly.name.toLowerCase().includes(jollySearchQuery.toLowerCase());
       
       let weeklyHours = 0;
@@ -991,7 +1032,7 @@ export default function App() {
                 className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
               >
                 <option value="">Tutti gli Operatori</option>
-                {jollyOperators.map(j => (
+                {sortedJollyOperators.map(j => (
                   <option key={j.id} value={j.name}>{j.name}</option>
                 ))}
               </select>
@@ -1049,17 +1090,26 @@ export default function App() {
 
                       return (
                       <div key={jolly.id} className="flex gap-2 min-h-[5rem]">
-                         <div className="w-32 shrink-0 bg-white p-2 border border-slate-200 rounded flex flex-col justify-center">
-                            <div className="text-xs font-bold text-slate-700 px-2 flex items-center gap-1.5" title={jolly.name}>
+                         <div 
+                           className={cn("w-36 shrink-0 bg-white py-2 pl-4 pr-2 border rounded flex flex-col justify-center relative group transition-colors", draggedJollyRowId === jolly.id ? "opacity-50 border-indigo-400 bg-indigo-50" : "border-slate-200")}
+                           draggable
+                           onDragStart={(e) => handleJollyRowDragStart(e, jolly.id)}
+                           onDragOver={handleJollyRowDragOver}
+                           onDrop={(e) => handleJollyRowDrop(e, jolly.id)}
+                         >
+                            <div className="absolute left-0.5 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 cursor-move text-slate-300 hover:text-slate-500 transition-opacity p-1" title="Trascina per riordinare">
+                               <GripVertical className="w-3 h-3" />
+                            </div>
+                            <div className="text-xs font-bold text-slate-700 flex items-center gap-1.5" title={jolly.name}>
                                <div className={cn("w-2 h-2 rounded-full shrink-0", weeklyHours >= 50 ? "bg-red-500" : weeklyHours >= 40 ? "bg-orange-500" : "bg-emerald-500")} title={`${weeklyHours}h / 50h max`} />
                                <span className="truncate">{jolly.name.split(' (')[0]}</span>
                             </div>
-                            <div className="text-[9px] text-indigo-500 font-semibold uppercase tracking-tighter px-2">Operatore</div>
-                            <div className="mt-1 px-2 text-[10px] font-bold text-slate-500">Totale: <span className="text-indigo-600">{weeklyHours}h</span></div>
+                            <div className="text-[9px] text-indigo-500 font-semibold uppercase tracking-tighter mt-0.5">Operatore</div>
+                            <div className="mt-1 text-[10px] font-bold text-slate-500">Totale: <span className="text-indigo-600">{weeklyHours}h</span></div>
                             {weeklyShifts.length > 0 && (
                               <button 
                                 onClick={() => simulateSMSToJolly(jolly, weeklyShifts)} 
-                                className="mt-2 mx-2 py-1 px-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-[9px] font-bold rounded flex items-center justify-center gap-1 transition-colors"
+                                className="mt-2 py-1 px-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-[9px] font-bold rounded flex items-center justify-center gap-1 transition-colors"
                               >
                                 <MessageSquare className="w-3 h-3" /> Invia SMS Turni
                               </button>
@@ -1247,7 +1297,7 @@ export default function App() {
       ) : (
         <div className="flex-grow overflow-auto bg-slate-50/50 rounded-lg border border-slate-200">
            <div className="p-4 space-y-4">
-              {jollyOperators
+              {sortedJollyOperators
                 .filter(jolly => jollySearchQuery ? jolly.name.toLowerCase().includes(jollySearchQuery.toLowerCase()) : true)
                 .map(jolly => {
                   const coveredAbsences = absences
@@ -1298,7 +1348,7 @@ export default function App() {
                     </div>
                   );
               })}
-              {jollyOperators.filter(jolly => jollySearchQuery ? jolly.name.toLowerCase().includes(jollySearchQuery.toLowerCase()) : true).length === 0 && (
+              {sortedJollyOperators.filter(jolly => jollySearchQuery ? jolly.name.toLowerCase().includes(jollySearchQuery.toLowerCase()) : true).length === 0 && (
                  <div className="p-8 text-center text-slate-400 text-sm italic">
                    Nessun operatore Jolly trovato per la ricerca.
                  </div>
@@ -1844,13 +1894,16 @@ export default function App() {
             <div className="p-4 overflow-y-auto flex-grow space-y-4">
               <div>
                 <label className="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Nominativo Operatore</label>
-                <input 
-                  type="text" 
+                <select
                   value={newRequestOperatorName}
                   onChange={(e) => setNewRequestOperatorName(e.target.value)}
-                  placeholder="Es. Mario Rossi"
                   className="w-full text-sm font-semibold text-slate-700 bg-white border border-slate-200 rounded-md px-3 py-2 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-                />
+                >
+                  <option value="">Seleziona un operatore...</option>
+                  {operators.map(op => (
+                    <option key={op.id} value={op.name}>{op.name}</option>
+                  ))}
+                </select>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
