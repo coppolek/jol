@@ -1,0 +1,6 @@
+{
+  "name": "Gestione Turni Jolly",
+  "description": "Applicazione per la gestione dei turni e delle coperture degli operatori jolly basata sulle assenze per ferie, malattie e permessi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

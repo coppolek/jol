@@ -1,0 +1,49 @@
+{
+  "rulesVersion": "2",
+  "collections": [
+    {
+      "name": "operators",
+      "path": "operators/{operatorId}",
+      "description": "Operators (employees)",
+      "readRules": [
+        { "type": "public", "condition": "true", "description": "Anyone can read" }
+      ],
+      "writeRules": [
+        { "type": "public", "condition": "true", "description": "Anyone can write" }
+      ]
+    },
+    {
+      "name": "sites",
+      "path": "sites/{siteId}",
+      "description": "Construction sites",
+      "readRules": [
+        { "type": "public", "condition": "true", "description": "Anyone can read" }
+      ],
+      "writeRules": [
+        { "type": "public", "condition": "true", "description": "Anyone can write" }
+      ]
+    },
+    {
+      "name": "absences",
+      "path": "absences/{absenceId}",
+      "description": "Reported absences",
+      "readRules": [
+        { "type": "public", "condition": "true", "description": "Anyone can read" }
+      ],
+      "writeRules": [
+        { "type": "public", "condition": "true", "description": "Anyone can write" }
+      ]
+    },
+    {
+      "name": "requests",
+      "path": "requests/{requestId}",
+      "description": "Time off requests",
+      "readRules": [
+        { "type": "public", "condition": "true", "description": "Anyone can read" }
+      ],
+      "writeRules": [
+        { "type": "public", "condition": "true", "description": "Anyone can write" }
+      ]
+    }
+  ]
+}
